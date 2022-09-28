@@ -65,17 +65,18 @@ class ErrorGeneratorForRREDv2:
         return imp_fd_map
 
     def get_chexpert_label(
-        self, impression_label_path, finding_sent_label_path, 
+        self, impression_label_path, finding_label_path, finding_sent_label_path, 
         class_group_info=None
         ):
 
         imp_label_df = pd.read_csv(impression_label_path)
+        fd_label_df = pd.read_csv(finding_label_path)
         fd_sent_label_df = pd.read_csv(finding_sent_label_path)
 
         if class_group_info is None:
             pass    
 
-        return imp_label_df, fd_sent_label_df
+        return imp_label_df, fd_label_df, fd_sent_label_df
 
     ########################################################################
     ########################################################################
@@ -271,20 +272,215 @@ class ErrorGeneratorForRREDv2:
         return laterality_errors
         
     def generate_perceptual_error(
-        self, fs_emb_matrix, fs_index_map, 
-        imp_emb_matrix, imp_index_map,
-        finding: str, impression: str, swap_prob
+        self, embedding_matrix, text_index_map,
+        finding: str, impression: str, 
+        chexbert_model, chexbert_tokenizer, batch_size, device,
+        fd_label_df,
+        swap_prob
         ):
 
-        def cos_sim(A, B):
-            return np.dot(A, B)/(norm(A)*norm(B))
+        generated_errors = {
+            'under_reading': [],
+            'satisfaction_of_search': [],
+        }
+
+        fd_features = fd_label_df[
+            fd_label_df['Reports'] == finding
+        ].values[0]
+        # Exclude "Report" and "No Finding"
+        _fd_features = fd_features.tolist()[1:-1]
+
+        fd_pos_idxs = self._get_idx_of_positive_label([_fd_features])[0]
+        # If there is no positive class, cannot generate perceptual error
+        if len(fd_pos_idxs) == 0:
+            return generated_errors
+
+        p_error_cand_list = []
+        for _ in range(batch_size * 2):
+            p_error_cand = self._get_p_error_candidate(
+                embedding_matrix, text_index_map,
+                finding, impression,
+                swap_prob
+                )
+            # if p_error_cand.strip() != '':
+            p_error_cand_list.append(p_error_cand)
+        if len(p_error_cand_list) == 0:
+            return generated_errors
+
+        y_pred = self._chexbert_forward(
+            chexbert_model, chexbert_tokenizer, batch_size, device,
+            p_error_cand_list
+        )
+        p_error_features_list = self._sample_wise(y_pred)
+        p_error_features_list = self._convert_chexbert_to_chexpert_label(p_error_features_list)
+        # Exclude "No Finding"
+        _error_features_list = [p_error_features[:-1] for p_error_features in p_error_features_list]
+
+        under_readings = []
+        satisfaction_of_searchs = []
+        for i in range(len(_error_features_list)):
+            if self._is_underreading(_error_features_list[i]):
+                #under_readings += p_error_cand_list[i]
+                under_readings += [(p_error_cand_list[i], _error_features_list[i])]
+
+            if self._is_satisfaction_of_search(_fd_features, _error_features_list[i]):
+                #satisfaction_of_searchs += p_error_cand_list[i]
+                satisfaction_of_searchs += [(p_error_cand_list[i], _error_features_list[i])]
+
+
+        if len(under_readings) > 0:
+            #random.shuffle(list(set(under_readings)))
+            generated_errors['under_reading'] += [under_readings[-1]]
+        if len(satisfaction_of_searchs) > 0:
+            #random.shuffle(list(set(satisfaction_of_searchs)))
+            generated_errors['satisfaction_of_search'] += [satisfaction_of_searchs[-1]]
+
+#        return generated_errors
+
+        generated_errors['original'] = [(finding, _fd_features)]
+        return generated_errors
+
+    def _generate_perceptual_error(
+        self, embedding_matrix, text_index_map,
+        finding: str, impression: str, 
+        chexbert_model, chexbert_tokenizer, batch_size, device,
+        swap_prob
+        ):
+
+        generated_errors = {
+            'under_reading': [],
+            'satisfaction_of_search': [],
+        }
+
+        p_error_cand_list = []
+        for _ in range(batch_size*2 - 1):
+            p_error_cand = self._get_p_error_candidate(
+                embedding_matrix, text_index_map,
+                finding, impression,
+                swap_prob
+                )
+            if len(p_error_cand) > 5:
+                p_error_cand_list.append(p_error_cand)
+
+        data = [finding] + p_error_cand_list
+        y_pred = self._chexbert_forward(
+            chexbert_model, chexbert_tokenizer, batch_size, device,
+            data
+        )
+        features_list = self._sample_wise(y_pred)
+        features_list = self._convert_chexbert_to_chexpert_label(features_list)
+
+        fd_features = features_list[0]
+        p_error_features_list = features_list[1:]
+
+        # Exclude "No Finding"
+        _features_list = [features[:-1] for features in features_list]
+
+        _fd_features = _features_list[0]
+        _p_error_features_list = _features_list[1:]
+
+        # If there is no positive class, cannot generate perceptual error
+        fd_pos_idxs = self._get_idx_of_positive_label([_fd_features])[0]
+        if len(fd_pos_idxs) == 0:
+            return generated_errors
+
+        under_readings = []
+        satisfaction_of_searchs = []
+        for i in range(len(_p_error_features_list)):
+            if self._is_underreading(_p_error_features_list[i]):
+                #under_readings += p_error_cand_list[i]
+                under_readings += [(p_error_cand_list[i], _p_error_features_list[i])]
+
+            if self._is_satisfaction_of_search(_fd_features, _p_error_features_list[i]):
+                #satisfaction_of_searchs += p_error_cand_list[i]
+                satisfaction_of_searchs += [(p_error_cand_list[i], _p_error_features_list[i])]
+
+
+        if len(under_readings) > 0:
+            #random.shuffle(list(set(under_readings)))
+            generated_errors['under_reading'] += [under_readings[-1]]
+        if len(satisfaction_of_searchs) > 0:
+            #random.shuffle(list(set(satisfaction_of_searchs)))
+            generated_errors['satisfaction_of_search'] += [satisfaction_of_searchs[-1]]
+
+        # p_error_list = []
+        # for i in range(len(_p_error_features_list)):
+        #     if self._is_perceptual_error(_fd_features, _p_error_features_list[i]):
+        #         #p_error_list += p_error_cand_list[i]
+        #         #str_e_f = ",".join(list(map(str, p_error_features_list[i])))
+        #         p_error_list += [(p_error_cand_list[i], p_error_features_list[i])]
+
+        # if len(p_error_list) > 0:
+        #     #random.shuffle(list(set(p_error_list)))
+        #     generated_errors['perceptual_error'] += [p_error_list[-1]]            
+
+        generated_errors['original'] = [(finding, fd_features)]
+
+        return generated_errors
+
+    def _get_idx_of_positive_label(self, features_list):
+        pos_idxs_list = []
+        for features in features_list:
+            pos_idxs = [idx for idx in range(len(features)) if features[idx] == float(1)]
+            pos_idxs_list.append(pos_idxs)
+        
+        return pos_idxs_list
+
+    def _is_perceptual_error(self, fd_features, p_error_features):
+        fd_pos_idxs = self._get_idx_of_positive_label([fd_features])[0]
+
+        _num_of_pos = 0
+        for idx in range(len(p_error_features)):
+            if idx in fd_pos_idxs:
+                if p_error_features[idx] == float(1):
+                    _num_of_pos += 1
+            else:
+                if p_error_features[idx] == float(1):
+                    return False
+
+        if _num_of_pos < len(fd_pos_idxs):
+            return True
+        else:
+            return False
+
+    def _is_underreading(self, p_error_features):
+        for idx in range(len(p_error_features)):
+            if p_error_features[idx] == float(1):
+                    return False
+
+        return True
+
+    def _is_satisfaction_of_search(self, fd_features, p_error_features):
+        fd_pos_idxs = self._get_idx_of_positive_label([fd_features])[0]
+        
+        # Exclude the case of "faulty reasoning"
+        for idx in range(len(p_error_features)):
+            if idx not in fd_pos_idxs:
+                if p_error_features[idx] == float(1):
+                    return False
+
+        _num_of_pos = 0
+        for pos_idx in fd_pos_idxs:
+            if p_error_features[pos_idx] == float(1):
+                _num_of_pos += 1
+
+        if _num_of_pos < len(fd_pos_idxs):
+            return True
+        else:
+            return False
+
+    def _get_p_error_candidate(
+        self, embedding_matrix, text_index_map,
+        finding: str, impression: str, swap_prob
+        ):
 
         f_sents = sent_tokenize(finding)
         sim_dist = []
         for f_sent in f_sents:
             sim_dist.append(
-                cos_sim(imp_emb_matrix[imp_index_map[impression]], 
-                        fs_emb_matrix[fs_index_map[f_sent]])
+                self.cos_sim(
+                    embedding_matrix[text_index_map[impression]], 
+                    embedding_matrix[text_index_map[f_sent]])
             )
 
         # get indexes of candidate sentences which should be eliminated
@@ -327,19 +523,98 @@ class ErrorGeneratorForRREDv2:
 
         final_finding = " ".join(final_finding)
 
-        return {
-            'perceptual_error': [final_finding]
-        }
+        return final_finding
+
+    def cos_sim(self, vector1, vector2):
+        return np.dot(vector1, vector2) / (norm(vector1)*norm(vector2))
+
+    def _chexbert_forward(
+            self, chexbert_model, chexbert_tokenizer, 
+            cm_batch_size, device,
+            p_error_cand_list
+        ):
+
+        with torch.no_grad():
+            y_pred = [[] for _ in range(len(self.chexbert_categories))]
+            # y_pred = (batch_size, 14)
+
+            for idx in range(0, len(p_error_cand_list), cm_batch_size):
+                mini_batch = chexbert_tokenizer(
+                    p_error_cand_list[idx: idx + cm_batch_size],
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+
+                # input_ids = torch.tensor(mini_batch['input_ids'], dtype=torch.long)
+                # attention_mask = torch.tensor(mini_batch['attention_mask'], dtype=torch.long)
+                
+                input_ids = mini_batch['input_ids'].to(device)
+                attention_mask = mini_batch['attention_mask'].to(device)
+
+                output = chexbert_model(
+                    source_padded=input_ids,
+                    attention_mask=attention_mask,
+                )
+                for i in range(len(output)):
+                    curr_y_pred = output[i].argmax(dim=1)
+                    y_pred[i].append(curr_y_pred)
+
+            for i in range(len(y_pred)):
+                y_pred[i] = torch.cat(y_pred[i], dim=0)
+        
+        y_pred = [t.tolist() for t in y_pred]
+        return y_pred
+
+    def _sample_wise(self, y_pred):
+
+        num_of_sample = len(y_pred[0])
+        sample_wise_y_pred = [[] for _ in range(num_of_sample)]
+        for i in range(num_of_sample):
+            for j in range(len(y_pred)):
+                sample_wise_y_pred[i].append(y_pred[j][i])
+            
+        return sample_wise_y_pred
+
+    def _convert_chexbert_to_chexpert_label(self, sample_wise_y_pred):
+
+        num_of_category = len(sample_wise_y_pred[0])
+        for i in range(len(sample_wise_y_pred)):
+            for j in range(num_of_category):
+                if sample_wise_y_pred[i][j] == 0:
+                    sample_wise_y_pred[i][j] = np.nan
+                elif sample_wise_y_pred[i][j] == 3:
+                    sample_wise_y_pred[i][j] = -1
+                elif sample_wise_y_pred[i][j] == 2:
+                    sample_wise_y_pred[i][j] = 0
+
+        for i in range(len(sample_wise_y_pred)):
+            sample_wise_y_pred[i] = list(map(float, sample_wise_y_pred[i]))
+
+        return sample_wise_y_pred
+
+    def _get_embedding_matrix(self, embedding_cache_path):
+        import pickle
+        
+        with open(embedding_cache_path, "rb") as f:
+            cache_data = pickle.load(f)
+            text = cache_data['text']
+            embeddings = cache_data['embeddings']
+
+        assert len(text) == len(embeddings)
+
+        embedding_matrix = []
+        text_index_map = {}
+        for idx in range(len(text)):
+            embedding_matrix.append(embeddings[idx])
+            text_index_map[text[idx]] = idx
+
+        return embedding_matrix, text_index_map
 
     def get_embedding_matrix(
         self, original_samples, 
         text_encoder, tokenizer, device, batch_size
     ):
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from health_multimodal.text.model import CXRBertModel
-        from health_multimodal.text.model import CXRBertTokenizer
 
         with torch.no_grad():
             samples = list(set(original_samples))
@@ -353,11 +628,11 @@ class ErrorGeneratorForRREDv2:
                     return_tensors="pt",
                 )
 
-                input_ids = torch.tensor(mini_batch['input_ids'], dtype=torch.long)
-                attention_mask = torch.tensor(mini_batch['attention_mask'], dtype=torch.long)
+                # input_ids = torch.tensor(mini_batch['input_ids'], dtype=torch.long)
+                # attention_mask = torch.tensor(mini_batch['attention_mask'], dtype=torch.long)
                 
-                input_ids = input_ids.to(device)
-                attention_mask = attention_mask.to(device)
+                input_ids = mini_batch['input_ids'].to(device)
+                attention_mask = mini_batch['attention_mask'].to(device)
 
                 last_hidden_states = text_encoder(
                     input_ids=input_ids,
