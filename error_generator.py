@@ -10,6 +10,8 @@ import re
 import json
 import nltk
 from nltk.tokenize import sent_tokenize
+from constants import *
+
 #nltk.download('punkt')
 
 class ErrorGeneratorForRREDv2:
@@ -362,21 +364,25 @@ class ErrorGeneratorForRREDv2:
             if len(p_error_cand) > 5:
                 p_error_cand_list.append(p_error_cand)
 
-        data = [finding] + p_error_cand_list
+        inputs = []
+        inputs.append(finding)
+        for p_error_cand in p_error_cand_list:
+            inputs.append(p_error_cand)
+
         y_pred = self._chexbert_forward(
             chexbert_model, chexbert_tokenizer, batch_size, device,
-            data
+            inputs
         )
         features_list = self._sample_wise(y_pred)
         features_list = self._convert_chexbert_to_chexpert_label(features_list)
 
-        fd_features = features_list[0]
-        p_error_features_list = features_list[1:]
-
         # Exclude "No Finding"
         _features_list = [features[:-1] for features in features_list]
+        for _features in _features_list:
+           self._post_process(_features)
 
         _fd_features = _features_list[0]
+        #self._post_process(_fd_features)
         _p_error_features_list = _features_list[1:]
 
         # If there is no positive class, cannot generate perceptual error
@@ -414,9 +420,49 @@ class ErrorGeneratorForRREDv2:
         #     #random.shuffle(list(set(p_error_list)))
         #     generated_errors['perceptual_error'] += [p_error_list[-1]]            
 
-        generated_errors['original'] = [(finding, fd_features)]
+        generated_errors['original'] = [(finding, _fd_features)]
 
         return generated_errors
+
+    def _post_process(self, features):
+
+        for idx in range(len(features)):
+            parents = self._get_all_parents(CONDITIONS[idx], CHEXBERT_RELATION_PAIRS)
+            if len(parents) > 0:
+                # if child's value is uncertain, let parent's value be uncertain
+                if float(features[idx]) == float(-1):
+                    for parent in parents:
+                        features[CONDITIONS_DICT[parent]] = float(-1)                
+
+                # if child's value is positive, let parent's value be positive
+                elif float(features[idx]) == float(1):
+                    for parent in parents:
+                        features[CONDITIONS_DICT[parent]] = float(1)
+
+    def _get_all_parents(self, child, relation_list):
+        
+        def get_parents(child, relation_list):
+            parents = []
+            for rel in relation_list:
+                p, c = rel[0], rel[1]
+                if c == child:
+                    parents.append(p)
+            
+            return parents
+
+        all_parents = []
+        curr_parents = get_parents(child, relation_list)
+        all_parents += curr_parents
+
+        while len(curr_parents) > 0:
+            next_parents = []
+            for parent in curr_parents:
+                next_parents += get_parents(parent, relation_list)
+            all_parents += next_parents
+
+            curr_parents = next_parents
+
+        return all_parents
 
     def _get_idx_of_positive_label(self, features_list):
         pos_idxs_list = []
@@ -426,22 +472,22 @@ class ErrorGeneratorForRREDv2:
         
         return pos_idxs_list
 
-    def _is_perceptual_error(self, fd_features, p_error_features):
-        fd_pos_idxs = self._get_idx_of_positive_label([fd_features])[0]
+    # def _is_perceptual_error(self, fd_features, p_error_features):
+    #     fd_pos_idxs = self._get_idx_of_positive_label([fd_features])[0]
 
-        _num_of_pos = 0
-        for idx in range(len(p_error_features)):
-            if idx in fd_pos_idxs:
-                if p_error_features[idx] == float(1):
-                    _num_of_pos += 1
-            else:
-                if p_error_features[idx] == float(1):
-                    return False
+    #     _num_of_pos = 0
+    #     for idx in range(len(p_error_features)):
+    #         if idx in fd_pos_idxs:
+    #             if p_error_features[idx] == float(1):
+    #                 _num_of_pos += 1
+    #         else:
+    #             if p_error_features[idx] == float(1):
+    #                 return False
 
-        if _num_of_pos < len(fd_pos_idxs):
-            return True
-        else:
-            return False
+    #     if _num_of_pos < len(fd_pos_idxs):
+    #         return True
+    #     else:
+    #         return False
 
     def _is_underreading(self, p_error_features):
         for idx in range(len(p_error_features)):
@@ -535,7 +581,7 @@ class ErrorGeneratorForRREDv2:
         ):
 
         with torch.no_grad():
-            y_pred = [[] for _ in range(len(self.chexbert_categories))]
+            y_pred = [[] for _ in range(len(CONDITIONS))]
             # y_pred = (batch_size, 14)
 
             for idx in range(0, len(p_error_cand_list), cm_batch_size):
@@ -578,9 +624,9 @@ class ErrorGeneratorForRREDv2:
 
     def _convert_chexbert_to_chexpert_label(self, sample_wise_y_pred):
 
-        num_of_category = len(sample_wise_y_pred[0])
+        num_of_conditions = len(sample_wise_y_pred[0])
         for i in range(len(sample_wise_y_pred)):
-            for j in range(num_of_category):
+            for j in range(num_of_conditions):
                 if sample_wise_y_pred[i][j] == 0:
                     sample_wise_y_pred[i][j] = np.nan
                 elif sample_wise_y_pred[i][j] == 3:
@@ -688,6 +734,9 @@ class ErrorGeneratorForRREDv2:
                 random.shuffle(swapped_findings)
                 generated_errors['swapped_findings'] += [swapped_findings[-1]]
 
+        # self._get_swap_finding의 경우 판독문 단위의 수정이므로 그 자체로 final errors
+        # self._get_swap_sentence 및 self._get_add_sentence의 경우 문장 단위의 수정이므로,
+        # candidate 생성 후 CheXbert 적용하여 검증 필요
         swapped_sentences = self._get_swap_sentence(
             finding,
             fd_sent_label_df

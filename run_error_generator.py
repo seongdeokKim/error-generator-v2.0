@@ -9,13 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# CXRbert
-#from models.configuration_cxrbert import CXRBertConfig
-#from models.modelling_cxrbert import CXRBertModel
-#from models.configuration_cxrbert import CXRBertTokenizer
-#from health_multimodal.text.model import CXRBertModel
-#from health_multimodal.text.model import CXRBertTokenizer
-
 # CheXbert
 from models.bert_labeler import bert_labeler
 from transformers import BertTokenizer
@@ -101,7 +94,7 @@ def generate_error(
         )
     print('...... LOADING CHEXPERT LABLER WITH PANDAS.DATAFRAME ......')
 
-    fw_test = open('/home/workspace/new_p_error_test.txt', 'w', encoding='utf-8')
+    fw_test = open('/home/workspace/_p_error_test.txt', 'w', encoding='utf-8')
     error_subtype_counter = {}
     with open(output_file, encoding= "utf-8",mode='w+') as fw:
         for idx, sample in enumerate(eg_v2.original_samples):
@@ -161,9 +154,9 @@ def generate_error(
                         original_label = "\t".join(list(map(str, error_findings_dict['original'][0][1])))
                         error_finding_label = "\t".join(list(map(str, error_finding[1])))
 
-                        fw_test.write('##{}\t{}\t{}\n##{}\t{}\t{}\n\n'.format(
+                        fw_test.write('##{}\t{}\t{}\n{}\t{}\t{}\n'.format(
                             str(idx), error_findings_dict['original'][0][0], original_label,
-                            str(idx) + "_" + error_subtype, error_finding[0], error_finding_label
+                            error_subtype, error_finding[0], error_finding_label
                         ))
                     continue
                 ##################################################
