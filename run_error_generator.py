@@ -36,6 +36,7 @@ def generate_error(
     perceptive_error, embedding_cache_path, chexbert_model_path, batch_size, device_mode,
     interpretive_error, 
     finding_sent_label_path, finding_label_path, impression_label_path,
+    max_epoch
     ):
 
     ERROR_TYPE_LIST = get_error_type_list(
@@ -44,7 +45,7 @@ def generate_error(
         perceptive_error
     )
     eg_v2 = ErrorGenerator()
-    eg_v2.chexbert_categories = CATEGORIES
+    eg_v2.chexbert_categories = CONDITIONS
 
     # load dataset
     eg_v2.load_original_samples(input_file)
@@ -81,122 +82,109 @@ def generate_error(
 
     chexbert_model.eval()
 
-    print('...... LOADING TEXT EMBEDDING ......')
-    embedding_matrix, text_index_map = eg_v2._get_embedding_matrix(embedding_cache_path)
+    print('...... LOADING TEXT EMBEDDING using CXR-BERT......')
+    embedding_matrix, text_index_map = eg_v2.get_embedding_matrix(embedding_cache_path)
 
     # get data for generating interpretive errors
-    imp_fd_map = eg_v2.get_imp_fd_pair_map()
-    print('...... LOADING IMPRESSION FINDING MAP ......')
+    print('...... LOADING FINDING LABEL using CheXbert ......')
+    finding_label_df = eg_v2.get_finding_label_df(
+        chexbert_model, chexbert_tokenizer, batch_size, device,
+        eg_v2.original_findings
+    )
 
+    print('...... LOADING CHEXPERT LABLER WITH PANDAS.DATAFRAME ......')
     imp_label_df, fd_label_df, fds_label_df = eg_v2.get_chexpert_label(
         impression_label_path, finding_label_path, finding_sent_label_path,
         class_group_info=None
         )
-    print('...... LOADING CHEXPERT LABLER WITH PANDAS.DATAFRAME ......')
 
-    fw_test = open('/home/workspace/_p_error_test.txt', 'w', encoding='utf-8')
     error_subtype_counter = {}
-    with open(output_file, encoding= "utf-8",mode='w+') as fw:
-        for idx, sample in enumerate(eg_v2.original_samples):
-            if sample['Findings'].strip() == '' or sample['Findings'] is None:
-                continue
-            if sample['Impression'].strip() == '' or sample['Impression'] is None:
-                continue
-
-            if (idx+1) % 500 == 0:
-                print(f'... {idx+1}/{len(eg_v2.original_samples)} finish ...')
-
-#            error_type = np.random.choice(ERROR_TYPE_LIST, 1, replace=False).item()
-            error_type = 'P'
-
-            if error_type == 'F':
-                error_findings_dict = eg_v2.generate_factual_error(
-                    sample['Findings'],
-                    n_prob=0.25, u_prob=0.25, l_prob=0.1
-                )
-
-            elif error_type == 'P':
-                # error_findings_dict = eg_v2.generate_perceptual_error(
-                #     fds_emb_matrix, fds_index_map, 
-                #     imp_emb_matrix, imp_index_map,
-                #     sample['Findings'], sample['Impression'],
-                #     chexbert_model, chexbert_tokenizer, batch_size, device,
-                #     fd_label_df,
-                #     swap_prob=0.5
-                # )
-                error_findings_dict = eg_v2._generate_perceptual_error(
-                    embedding_matrix, text_index_map, 
-                    sample['Findings'], sample['Impression'],
-                    chexbert_model, chexbert_tokenizer, batch_size, device,
-                    swap_prob=0.5
-                )
-
-            elif error_type == 'I':
-                error_findings_dict = eg_v2.generate_interpretive_error(
-                    sample['Findings'],
-                    sample['Impression'],
-                    imp_fd_map, 
-                    imp_label_df, fds_label_df,
-                    sf_prob=1, ss_prob=1, as_prob=1
-                )
-
-
-            for error_subtype, error_finding_list in error_findings_dict.items():
-                if error_subtype == 'swapped_sentences':
+    for epoch in range(int(max_epoch)):
+        with open(output_file.replace('.jsonl', f'_e{epoch+1}.jsonl'), encoding= "utf-8",mode='w+') as fw:
+            for idx, sample in enumerate(eg_v2.original_samples):
+                if sample['Findings'].strip() == '' or sample['Findings'] is None:
                     continue
-                if error_subtype == 'added_sentences':
+                if sample['Impression'].strip() == '' or sample['Impression'] is None:
                     continue
 
-                ##################################################
-                ##################################################
-                if error_subtype == 'under_reading' or error_subtype == 'satisfaction_of_search':
+                if (idx+1) % 100 == 0:
+                    print(f'... EPOCH {epoch+1} ::: {idx+1}/{len(eg_v2.original_samples)} finish ...')
+
+                error_type = np.random.choice(ERROR_TYPE_LIST, 1, p=[0.2,0.4,0.4],replace=False).item()
+                #error_type = 'I'
+
+                #start = time.time()
+
+                if error_type == 'F':
+                    error_findings_dict = eg_v2.generate_factual_error(
+                        sample['Findings'],
+                        n_prob=0.25, u_prob=0.25, l_prob=0.1
+                    )
+
+                elif error_type == 'P':
+                    error_findings_dict = eg_v2.generate_perceptual_error(
+                        embedding_matrix, text_index_map, 
+                        sample['Findings'], sample['Impression'],
+                        chexbert_model, chexbert_tokenizer, batch_size, device,
+                        swap_prob=0.5
+                    )
+
+                elif error_type == 'I':
+                    # error_findings_dict = eg_v2.generate_interpretive_error(
+                    #     sample['Findings'],
+                    #     sample['Impression'],
+                    #     imp_fd_map, 
+                    #     imp_label_df, fds_label_df,
+                    #     sf_prob=1, ss_prob=1, as_prob=1
+                    # )
+                    error_findings_dict = eg_v2._generate_interpretive_error(
+                        sample['Findings'], finding_label_df, fds_label_df,
+                        chexbert_model, chexbert_tokenizer, batch_size, device,
+                        sf_prob=1, ss_prob=1, as_prob=1
+                    )
+
+                for error_subtype, error_finding_list in error_findings_dict.items():
                     for error_finding in error_finding_list:
-                        original_label = "\t".join(list(map(str, error_findings_dict['original'][0][1])))
-                        error_finding_label = "\t".join(list(map(str, error_finding[1])))
+                        error_sample = dict(sample)
 
-                        fw_test.write('##{}\t{}\t{}\n{}\t{}\t{}\n'.format(
-                            str(idx), error_findings_dict['original'][0][0], original_label,
-                            error_subtype, error_finding[0], error_finding_label
-                        ))
-                    continue
-                ##################################################
-                ##################################################
-                for error_finding in error_finding_list:
-                    error_sample = dict(sample)
+                        error_sample['Findings'] = error_finding
+                        error_sample['error_subtype'] = error_subtype
+                        error_sample['original_Findings'] = sample['Findings']
+                                
+                        json_record = json.dumps(error_sample, ensure_ascii=False)
+                        fw.write(json_record+"\n")
 
-                    error_sample['Findings'] = error_finding
-                    error_sample['error_subtype'] = error_subtype
-                    error_sample['original_Findings'] = sample['Findings']
-                            
-                    json_record = json.dumps(error_sample, ensure_ascii=False)
-                    fw.write(json_record+"\n")
+                        if error_subtype not in error_subtype_counter:
+                            error_subtype_counter[error_subtype] = 0
+                        error_subtype_counter[error_subtype] += 1
 
-                    if error_subtype not in error_subtype_counter:
-                        error_subtype_counter[error_subtype] = 0
-                    error_subtype_counter[error_subtype] += 1
-        print(error_subtype_counter)
+                #print(f"{error_type} error, {str(time.time()-start)[:5]}")
+
+    print(error_subtype_counter)
 
 def main():
     parser = argparse.ArgumentParser()
 #    parser.add_argument("--input", type=str, help="input file of unaugmented data")
-    parser.add_argument("--input", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/frontal_val.jsonl", help="input file of unaugmented data")
+    parser.add_argument("--input", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/frontal_test.jsonl", help="input file of unaugmented data")
 
-    parser.add_argument("--output", type=str, default="/home/workspace/rred_v2_frontal__test_error.jsonl", help="output file of unaugmented data")
-#    parser.add_argument("--output", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/error_baseline_Mixed_FPI_v0.1/frontal_test_error.jsonl", help="output file of unaugmented data")
+#    parser.add_argument("--output", type=str, default="/home/workspace/rred_v2_frontal_val_error.jsonl", help="output file of unaugmented data")
+    parser.add_argument("--output", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/error_baseline_Mixed_FPI_v0.2/frontal_test_error.jsonl", help="output file of unaugmented data")
 
-    parser.add_argument("--factual_error", type=bool, choices=[True, False], default=False, help="True if we want to generate factual errors")
+    parser.add_argument("--factual_error", type=bool, choices=[True, False], default=True, help="True if we want to generate factual errors")
 
     parser.add_argument("--perceptive_error", type=bool, choices=[True, False], default=True)
     parser.add_argument("--embedding_cache_path", type=str, default="/home/data/cxr_bert/embedding_cache_path.pkl", help="embeddings of text using CXR-BERT")
     parser.add_argument("--chexbert_model_path", type=str, default="/home/workspace/models/chexbert.pth")
-    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--device", type=str, default='cuda')
 #    parser.add_argument("--device", type=str, default='cpu')
 
-    parser.add_argument("--interpretive_error", type=bool, choices=[True, False], default=False, help="True if we want to generate interpretive errors")
+    parser.add_argument("--interpretive_error", type=bool, choices=[True, False], default=True, help="True if we want to generate interpretive errors")
     parser.add_argument("--finding_sent_label_path", default="/home/data/CheXpert_labeler_result/labeled_chexpert_finding_sent.csv", type=str)
     parser.add_argument("--finding_label_path", default="/home/data/CheXpert_labeler_result/labeled_chexpert_finding.csv", type=str)
     parser.add_argument("--impression_label_path", default="/home/data/CheXpert_labeler_result/labeled_chexpert_impression.csv", type=str)
+
+    parser.add_argument("--max_epoch", default=10, type=int)
 
     args = parser.parse_args()
 
@@ -211,6 +199,7 @@ def main():
         args.perceptive_error, args.embedding_cache_path, args.chexbert_model_path, args.batch_size, args.device,
         args.interpretive_error, 
         args.finding_sent_label_path, args.finding_label_path, args.impression_label_path,
+        args.max_epoch
     )
 
     
