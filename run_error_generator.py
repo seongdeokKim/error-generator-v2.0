@@ -110,8 +110,8 @@ def generate_error(
                 if (idx+1) % 100 == 0:
                     print(f'... EPOCH {epoch+1} ::: {idx+1}/{len(eg_v2.original_samples)} finish ...')
 
-                error_type = np.random.choice(ERROR_TYPE_LIST, 1, p=[0.2,0.4,0.4],replace=False).item()
-                #error_type = 'I'
+                #error_type = np.random.choice(ERROR_TYPE_LIST, 1, p=[0.2,0.4,0.4],replace=False).item()
+                error_type = 'I'
 
                 #start = time.time()
 
@@ -123,40 +123,32 @@ def generate_error(
 
                 elif error_type == 'P':
                     error_findings_dict = eg_v2.generate_perceptual_error(
-                        embedding_matrix, text_index_map, 
+                        embedding_matrix, text_index_map, finding_label_df,
                         sample['Findings'], sample['Impression'],
                         chexbert_model, chexbert_tokenizer, batch_size, device,
                         swap_prob=0.5
                     )
 
                 elif error_type == 'I':
-                    # error_findings_dict = eg_v2.generate_interpretive_error(
-                    #     sample['Findings'],
-                    #     sample['Impression'],
-                    #     imp_fd_map, 
-                    #     imp_label_df, fds_label_df,
-                    #     sf_prob=1, ss_prob=1, as_prob=1
-                    # )
-                    error_findings_dict = eg_v2._generate_interpretive_error(
+                    error_findings_dict = eg_v2.generate_interpretive_error(
                         sample['Findings'], finding_label_df, fds_label_df,
                         chexbert_model, chexbert_tokenizer, batch_size, device,
                         sf_prob=1, ss_prob=1, as_prob=1
                     )
 
-                for error_subtype, error_finding_list in error_findings_dict.items():
-                    for error_finding in error_finding_list:
-                        error_sample = dict(sample)
+                for error_subtype, error_finding in error_findings_dict.items():
+                    error_sample = dict(sample)
 
-                        error_sample['Findings'] = error_finding
-                        error_sample['error_subtype'] = error_subtype
-                        error_sample['original_Findings'] = sample['Findings']
-                                
-                        json_record = json.dumps(error_sample, ensure_ascii=False)
-                        fw.write(json_record+"\n")
+                    error_sample['Findings'] = error_finding
+                    error_sample['error_subtype'] = error_subtype
+                    error_sample['original_Findings'] = sample['Findings']
+                            
+                    json_record = json.dumps(error_sample, ensure_ascii=False)
+                    fw.write(json_record+"\n")
 
-                        if error_subtype not in error_subtype_counter:
-                            error_subtype_counter[error_subtype] = 0
-                        error_subtype_counter[error_subtype] += 1
+                    if error_subtype not in error_subtype_counter:
+                        error_subtype_counter[error_subtype] = 0
+                    error_subtype_counter[error_subtype] += 1
 
                 #print(f"{error_type} error, {str(time.time()-start)[:5]}")
 
@@ -167,8 +159,8 @@ def main():
 #    parser.add_argument("--input", type=str, help="input file of unaugmented data")
     parser.add_argument("--input", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/frontal_test.jsonl", help="input file of unaugmented data")
 
-#    parser.add_argument("--output", type=str, default="/home/workspace/rred_v2_frontal_val_error.jsonl", help="output file of unaugmented data")
-    parser.add_argument("--output", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/error_baseline_Mixed_FPI_v0.2/frontal_test_error.jsonl", help="output file of unaugmented data")
+    parser.add_argument("--output", type=str, default="/home/workspace/rred_v2_frontal_test_error.jsonl", help="output file of unaugmented data")
+#    parser.add_argument("--output", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/error_baseline_Mixed_FPI_v0.2/frontal_test_error.jsonl", help="output file of unaugmented data")
 
     parser.add_argument("--factual_error", type=bool, choices=[True, False], default=True, help="True if we want to generate factual errors")
 
@@ -184,7 +176,7 @@ def main():
     parser.add_argument("--finding_label_path", default="/home/data/CheXpert_labeler_result/labeled_chexpert_finding.csv", type=str)
     parser.add_argument("--impression_label_path", default="/home/data/CheXpert_labeler_result/labeled_chexpert_impression.csv", type=str)
 
-    parser.add_argument("--max_epoch", default=10, type=int)
+    parser.add_argument("--max_epoch", default=1, type=int)
 
     args = parser.parse_args()
 

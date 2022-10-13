@@ -30,12 +30,6 @@ class ErrorGeneratorForRREDv2:
         self.original_finding_sents = []
         self.original_impressions = []
 
-        self.chexpert_label_group = {
-            "GROUP1": ["Lung Opacity", "Edema", "Consolidation", "Pneumonia", "Lung Lesion", "Atelectasis"],
-            "GROUP2": ["Enlarged Cardiomediastinum", "Cardiomegaly"],
-            "OTHERS": ["Reports", "No Finding", "Support Devices", "Fracture", "Pleural Other", "Pleural Effusion", "Pneumothorax"]
-        }
-
     def load_original_samples(self, input_path):
         self.original_samples = [json.loads(l) for l in open(input_path)]
         for sample in self.original_samples:
@@ -101,11 +95,11 @@ class ErrorGeneratorForRREDv2:
 
         # Apply the tree structure of the CheXpert labeler
         for features in features_list:
-           self._post_process(features)
+           self._convert_tree_structure(features)
 
         findings_df = pd.DataFrame(findings, columns = [REPORTS])
-        features_df = pd.DataFrame(features_list, columns = CONDITIONS)
-        finding_label_df = pd.concat([findings_df, features_df], axis=1, join='inner')
+        fd_features_df = pd.DataFrame(features_list, columns = CONDITIONS)
+        finding_label_df = pd.concat([findings_df, fd_features_df], axis=1, join='inner')
 
         return finding_label_df
 
@@ -297,8 +291,8 @@ class ErrorGeneratorForRREDv2:
         return laterality_errors
         
     def generate_perceptual_error(
-        self, embedding_matrix, text_index_map,
-        finding: str, impression: str, 
+        self, embedding_matrix, text_index_map, finding_label_df,
+        finding: str, impression: str,
         chexbert_model, chexbert_tokenizer, batch_size, device,
         swap_prob
         ):
@@ -308,36 +302,38 @@ class ErrorGeneratorForRREDv2:
             'satisfaction_of_search': [],
         }
 
-        p_error_cand_list = []
+        fd_features = finding_label_df[
+            finding_label_df[REPORTS] == finding
+        ].values[0][1:]
+        # if there is no finding, cannot generate perceptual error
+        if fd_features[-1] == float(1):
+            return []
+        # Exclude "No Finding" label
+        _fd_features = fd_features[:-1]
+
+
+        error_cand_list = []
         for _ in range(2*batch_size - 1):
-            p_error_cand = self._get_p_error_candidate(
+            error_cand = self._get_p_error_candidate(
                 embedding_matrix, text_index_map,
                 finding, impression,
                 swap_prob
                 )
-            if len(p_error_cand) > 5:
-                p_error_cand_list.append(p_error_cand)
-
-        inputs = []
-        inputs.append(finding)
-        for p_error_cand in p_error_cand_list:
-            inputs.append(p_error_cand)
+            if len(error_cand) > 5:
+                error_cand_list.append(error_cand)
 
         y_pred = self._chexbert_forward(
             chexbert_model, chexbert_tokenizer, batch_size, device,
-            inputs
+            error_cand_list
         )
-        features_list = self._sample_wise(y_pred)
-        features_list = self._map_chexbert_to_chexpert_label(features_list)
+        error_features_list = self._sample_wise(y_pred)
+        error_features_list = self._map_chexbert_to_chexpert_label(error_features_list)
 
         # Apply the tree structure of the CheXpert labeler
-        for features in features_list:
-           self._post_process(features)
+        for error_features in error_features_list:
+           self._convert_tree_structure(error_features)
         # Exclude "No Finding"
-        _features_list = [features[:-1] for features in features_list]
-
-        _fd_features = _features_list[0]
-        _p_error_features_list = _features_list[1:]
+        _error_features_list = [error_features[:-1] for error_features in error_features_list]
 
         # If there is no positive class, cannot generate perceptual error
         fd_pos_idxs = self._get_idx_of_positive_label([_fd_features])[0]
@@ -346,14 +342,14 @@ class ErrorGeneratorForRREDv2:
 
         under_readings = []
         satisfaction_of_searchs = []
-        for i in range(len(_p_error_features_list)):
-            if self._is_underreading(_p_error_features_list[i]):
-                under_readings.append(p_error_cand_list[i])
+        for i in range(len(_error_features_list)):
+            if self._is_underreading(_error_features_list[i]):
+                under_readings.append(error_cand_list[i])
                 #under_readings += [(p_error_cand_list[i], _p_error_features_list[i])]
 
-            if self._is_satisfaction_of_search(_fd_features, _p_error_features_list[i]):
-                satisfaction_of_searchs.append(p_error_cand_list[i])
-                #satisfaction_of_searchs += [(p_error_cand_list[i], _p_error_features_list[i])]
+            if self._is_satisfaction_of_search(_fd_features, _error_features_list[i]):
+                satisfaction_of_searchs.append(error_cand_list[i])
+                #satisfaction_of_searchs += [(error_cand_list[i], _error_features_list[i])]
 
 
         if len(under_readings) > 0:
@@ -365,7 +361,7 @@ class ErrorGeneratorForRREDv2:
 
         return generated_errors
 
-    def _post_process(self, features):
+    def _convert_tree_structure(self, features):
 
         # if child's value is uncertain, let parent's value be uncertain
         for idx in range(len(features)):
@@ -408,14 +404,6 @@ class ErrorGeneratorForRREDv2:
             curr_parents = next_parents
 
         return all_parents
-
-    def _get_idx_of_positive_label(self, features_list):
-        pos_idxs_list = []
-        for features in features_list:
-            pos_idxs = [idx for idx in range(len(features)) if features[idx] == float(1)]
-            pos_idxs_list.append(pos_idxs)
-        
-        return pos_idxs_list
 
     def _is_underreading(self, p_error_features):
         for idx in range(len(p_error_features)):
@@ -595,19 +583,11 @@ class ErrorGeneratorForRREDv2:
 #
 #                return random_sent
 
-    # def generate_interpretive_error(
-    #     self, finding: str, impression: str,
-    #     imp_fd_map: dict, 
-    #     imp_label_df, fd_sent_label_df,
-    #     sf_prob: float , ss_prob: float, as_prob: float
-    # ):
-    def _generate_interpretive_error(
+    def generate_interpretive_error(
         self, finding: str, finding_label_df, fd_sent_label_df,
         chexbert_model, chexbert_tokenizer, batch_size, device,
         sf_prob: float , ss_prob: float, as_prob: float
     ):
-        # 서로 다른 finding이 같은 impression을 갖는 경우 존재
-        # chexpert_labeler 결과, impression만 존재하며 finding은 없음 -> 추후 mapping 작업도 필요
 
         generated_errors = {
             'faulty_reasoning_1': [],
@@ -616,64 +596,60 @@ class ErrorGeneratorForRREDv2:
             'original': []
         }
 
-        faulty_reasoning_1_list = self._get_faulty_reasoning_1(
-            finding, finding_label_df
-        )
+        fd_features = finding_label_df[
+            finding_label_df[REPORTS] == finding
+        ].values[0][1:]
 
-        if len(faulty_reasoning_1_list) > 0:
-            #if np.random.choice([True, False], 1, p=[sf_prob, 1-sf_prob]).item():
-            # shuffling numerical_errors
-            random.shuffle(faulty_reasoning_1_list)
-            generated_errors['faulty_reasoning_1'] += [faulty_reasoning_1_list[-1]]
 
-            # fd_features = finding_label_df[
-            #     finding_label_df[REPORTS] == finding
-            # ].values[0][1:]
-            # self._post_process(fd_features[:-1])
-            # generated_errors['original'] = [(finding, fd_features)]
-
-        # self._get_faulty_reasoning_1의 경우 판독문 단위의 수정이므로 그 자체로 final errors
-        # self._get_faulty_reasoning_2 및 self._get_complacency의 경우 문장 단위의 수정이므로,
-        # candidate 생성 후 CheXbert 적용하여 검증 필요
-        # faulty_reasoning_2_list = self._get_faulty_reasoning_2(
-        #     finding, fd_sent_label_df,
-        #     chexbert_model, chexbert_tokenizer, batch_size, device
+        # faulty_reasoning_1_list = self._get_faulty_reasoning_1(
+        #     finding, fd_features, finding_label_df
         # )
 
-        # if len(faulty_reasoning_2_list) > 0:
+        # if len(faulty_reasoning_1_list) > 0:
         #     #if np.random.choice([True, False], 1, p=[sf_prob, 1-sf_prob]).item():
         #     # shuffling numerical_errors
-        #     random.shuffle(faulty_reasoning_2_list)
-        #     generated_errors['faulty_reasoning_2'] += [faulty_reasoning_2_list[-1]]
+        #     #random.shuffle(faulty_reasoning_1_list)
+        #     generated_errors['faulty_reasoning_1'] += [faulty_reasoning_1_list[-1]]
 
-        #     fd_features = finding_label_df[
-        #         finding_label_df[REPORTS] == finding
-        #     ].values[0][1:]
-        #     self._post_process(fd_features)
-        #     generated_errors['original'] = [(finding, fd_features[:-1])]
 
-        # added_sentences = self._get_complacency(
-        #     finding,
-        #     fd_sent_label_df
-        #     )
+        faulty_reasoning_2_list = self._get_faulty_reasoning_2(
+            finding, fd_features, 
+            finding_label_df, fd_sent_label_df,
+            chexbert_model, chexbert_tokenizer, batch_size, device
+        )
+
+        if len(faulty_reasoning_2_list) > 0:
+            #if np.random.choice([True, False], 1, p=[sf_prob, 1-sf_prob]).item():
+            # shuffling numerical_errors
+            random.shuffle(faulty_reasoning_2_list)
+            generated_errors['faulty_reasoning_2'] += [faulty_reasoning_2_list[-1]]
+
+        complacency_list = self._get_complacency(
+            finding, fd_features,
+            finding_label_df, fd_sent_label_df,
+            chexbert_model, chexbert_tokenizer, batch_size, device
+            )
+
+        if len(complacency_list) > 0:
+            generated_errors['complacency'] += [complacency_list[-1]]
+
+        
+        generated_errors['original'] = [(finding, fd_features[:-1])]
 
         return generated_errors
 
     def _get_faulty_reasoning_1(
-        self, finding: str, finding_label_df
+        self, finding: str, fd_features, finding_label_df
         ):
+
+        # if there is no finding, cannot generate faulty_reasoning_1 error
+        if fd_features[-1] == float(1):
+            return []
+        # Exclude "No Finding" class
+        _fd_features = fd_features[:-1]
 
         cond_list = finding_label_df.keys()
 
-        fd_features = finding_label_df[
-            finding_label_df[REPORTS] == finding
-        ].values[0]
-
-        # if there is not finding, cannot generate faulty_reasoning_1 error
-        # else exclude "No Finding" class
-        if fd_features[-1] != float(1):
-            return []
-        _fd_features = fd_features[:-1]
 
         # 1. pos + neg -> 합집합O, 교집합X
         # 2. 50%/50%: ~fuzzy(=random) OR fuzzy func. 기준 유사도 높은 candidates(but label 상이) 추출
@@ -708,12 +684,6 @@ class ErrorGeneratorForRREDv2:
                 opp_fd_idxes.append(idx)
         opp_fd_idxes = list(set(opp_fd_idxes))
         opp_fd_idxes.sort(reverse=False)
-        #print(f"{len(opp_fd_idxes)} of idxes searched")
-        # error_df = finding_label_df.iloc[opp_fd_idxes]
-        # error_fd_list = error_df.loc[:, REPORTS].values.tolist()
-        # error_features_list = error_df.loc[:, CONDITIONS].values.tolist()
-        # # Exclude "No Finding
-        # _error_features_list = [error_features[:-1] for error_features in error_features_list]
 
         if len(opp_fd_idxes) < 1:
             return []
@@ -727,7 +697,6 @@ class ErrorGeneratorForRREDv2:
             opp_fd_idx = opp_fd_idxes[random_idx]
             error_fd = finding_label_df.iloc[opp_fd_idx][REPORTS]
             error_features = finding_label_df.iloc[opp_fd_idx][CONDITIONS]
-            #print(f"{len(pos_opp_fd_idxes)}||{len(neg_opp_fd_idxes)}||{len(opp_fd_idxes)} indexes searched")
             return [error_fd]
             #return [(error_fd_list[-1], _error_features_list[-1])]
 
@@ -760,26 +729,52 @@ class ErrorGeneratorForRREDv2:
         return error_fd
 
     def _get_faulty_reasoning_2(
-        self, finding: str, fd_sent_label_df,
+        self, finding: str, fd_features, 
+        finding_label_df, fd_sent_label_df,
         chexbert_model, chexbert_tokenizer, batch_size, device        
         ):
+
+
+        # if there is no finding, cannot generate faulty_reasoning_2 error
+        if fd_features[-1] == float(1):
+            return []
+
         faulty_reasoning_2_list = []
 
-        cond_list = fd_sent_label_df.keys()
+        cond_list = finding_label_df.keys()[1:]
+        _cond_list = fd_sent_label_df.keys()[1:]
+        assert cond_list.all() == _cond_list.all()
 
+        # Exclude "No Finding" label
+        _fd_features = fd_features[:-1]
+
+        fd_pos_cond_idxs = np.where(_fd_features == float(1))[0]
+        fd_pos_conds = [cond_list[idx] for idx in fd_pos_cond_idxs]
+
+        fd_neg_cond_idxs = np.where(_fd_features == float(0))[0]
+        fd_neg_conds = [cond_list[idx] for idx in fd_neg_cond_idxs]
+
+        swap_fd_sent_dict = {}
         fd_sents = sent_tokenize(finding)
-        error_fd_sent_dict = {}
         for sent_id in range(len(fd_sents)):
 
             fd_sent_features = fd_sent_label_df[
                 fd_sent_label_df[REPORTS] == fd_sents[sent_id]
-            ].values[0]
+            ].values[0][1:]
+            # Exclude "No Finding"
+            _fd_sent_features = fd_sent_features[:-1]
 
-            pos_cond_idxs = np.where(fd_sent_features == float(1))[0]
-            pos_conds = [cond_list[idx] for idx in pos_cond_idxs]
+            fd_sent_pos_cond_idxs = np.where(_fd_sent_features == float(1))[0]
+            fd_sent_pos_conds = [cond_list[idx] for idx in fd_sent_pos_cond_idxs]
+            pos_conds = [fd_sent_pos_cond for fd_sent_pos_cond in fd_sent_pos_conds if fd_sent_pos_cond in fd_pos_conds]
 
-            neg_cond_idxs = np.where(fd_sent_features == float(0))[0]
-            neg_conds = [cond_list[idx] for idx in neg_cond_idxs]
+            fd_sent_neg_cond_idxs = np.where(_fd_sent_features == float(0))[0]
+            fd_sent_neg_conds = [cond_list[idx] for idx in fd_sent_neg_cond_idxs]
+            neg_conds = [fd_sent_neg_cond for fd_sent_neg_cond in fd_sent_neg_conds if fd_sent_neg_cond in fd_neg_conds]
+
+            if len(pos_conds) == 0 and len(neg_conds) == 0:
+                continue
+
 
             pos_opp_fd_sent_idxes = []
             for pos_cond in pos_conds:
@@ -795,30 +790,29 @@ class ErrorGeneratorForRREDv2:
                 ].index
                 neg_opp_fd_sent_idxes += list(curr_neg_opp_fd_sent_idxes)
 
+
             opp_fd_sent_idxes = pos_opp_fd_sent_idxes + neg_opp_fd_sent_idxes
-            if len(opp_fd_sent_idxes) == 0:
-                continue           
-
             opp_fd_sent_idxes = list(set(opp_fd_sent_idxes))
-            random.shuffle(opp_fd_sent_idxes)
-            _opp_fd_sent_idxes = opp_fd_sent_idxes[:10]
-            _opp_fd_sent_idxes.sort(reverse=False)
+            if len(opp_fd_sent_idxes) > 0:
+                random.shuffle(opp_fd_sent_idxes)
+                _opp_fd_sent_idxes = opp_fd_sent_idxes[:10]
+                _opp_fd_sent_idxes.sort(reverse=False)
 
-            error_df = fd_sent_label_df.iloc[_opp_fd_sent_idxes]
-            error_fd_sent_list = error_df.loc[:, REPORTS].values.tolist()
-            # error_features_list = error_df.loc[:, CONDITIONS].values.tolist()
-            error_fd_sent_dict[sent_id] = error_fd_sent_list
+                tmp_df = fd_sent_label_df.iloc[_opp_fd_sent_idxes]
+                swap_fd_sent_list = tmp_df.loc[:, REPORTS].values.tolist()
+                # swap_features_list = tmp_df.loc[:, CONDITIONS].values.tolist()
+                swap_fd_sent_dict[sent_id] = swap_fd_sent_list
 
         error_cand_list = []
-        for _ in range(2*batch_size - 1):
-            error_cand = []
+        for _ in range(2*batch_size):
+            error_cand = []       
             swap_count = 0
             for sent_id in range(len(fd_sents)):
                 is_swap = np.random.choice([True, False], 1, p=[0.5, 0.5]).item()
-                if sent_id in error_fd_sent_dict and is_swap:
-                    error_fd_sent_list = error_fd_sent_dict[sent_id]
-                    random_idx = random.randrange(len(error_fd_sent_list))
-                    error_cand.append(error_fd_sent_list[random_idx])
+                if sent_id in swap_fd_sent_dict and is_swap:
+                    swap_fd_sent_list = swap_fd_sent_dict[sent_id]
+                    random_idx = random.randrange(len(swap_fd_sent_list))
+                    error_cand.append(swap_fd_sent_list[random_idx])
                     swap_count += 1
                 else:
                     error_cand.append(fd_sents[sent_id])
@@ -830,29 +824,17 @@ class ErrorGeneratorForRREDv2:
                 error_cand = " ".join(error_cand)
                 error_cand_list.append(error_cand)
 
-        inputs = []
-        inputs.append(finding)
-        for error_cand in error_cand_list:
-            inputs.append(error_cand)
-
         y_pred = self._chexbert_forward(
             chexbert_model, chexbert_tokenizer, batch_size, device,
-            inputs
+            error_cand_list
         )
-        features_list = self._sample_wise(y_pred)
-        features_list = self._map_chexbert_to_chexpert_label(features_list)
+        error_features_list = self._sample_wise(y_pred)
+        error_features_list = self._map_chexbert_to_chexpert_label(error_features_list)
+        for error_features in error_features_list:
+           self._convert_tree_structure(error_features)
 
-        # Apply the tree structure of the CheXpert labeler
-        for features in features_list:
-           self._post_process(features)
         # Exclude "No Finding"
-        _features_list = [features[:-1] for features in features_list]
-
-        _fd_features = _features_list[0]
-        _error_features_list = _features_list[1:]
-
-        # If there is no positive class, cannot generate perceptual error
-        #fd_pos_idxs = self._get_idx_of_positive_label([_fd_features])[0]
+        _error_features_list = [error_features[:-1] for error_features in error_features_list]
 
         faulty_reasoning_2_list = []
         for i in range(len(_error_features_list)):
@@ -865,16 +847,16 @@ class ErrorGeneratorForRREDv2:
         else:
             return []
 
-    def _is_faulty_reasoning(self, fd_features, error_features):
+    def _is_faulty_reasoning(self, _fd_features, _error_features):
         # pos가 neg
         # neg가 pos
-        # 위의 2조건이 &&로 묶여야 함.
+        # 위의 2조건이 &로 묶여야 함.
 
-        assert len(fd_features) == len(error_features)
+        assert len(_fd_features) == len(_error_features)
 
         pos_neg = False
         neg_pos = False
-        for f_f, e_f in zip(fd_features, error_features):
+        for f_f, e_f in zip(_fd_features, _error_features):
             if f_f == float(1) and e_f == float(0):
                 pos_neg = True
             if f_f == float(0) and e_f == float(1):
@@ -885,19 +867,130 @@ class ErrorGeneratorForRREDv2:
         else:
             return False
 
-    def _get_complacency(self, finding: str, fd_sent_label_df):
-        # to generate false-positive error, there must be no finding
-        # pos condition = 0인데, 일부 문장들을 추가하여 pos condition > 0 으로 만들어야 함
-        # 1) finding_label_df를 argument로 받아서 "No Finding"=1인 경우를 활용할지, 나머지 모든 cond을 체크할지
-        # 1-1) finding_label_df를 통해 얻은 fd_feature를 그대로 사용하고, 이후 CheXbert forward 할 때 finding은 넣지 말지
-        # 1-2) 아니라면 CheXbert에 finding과 candidate error findings를 한 번에 forward할지 (이전 코드들과 일관성 높음)
-        # 2) 몇개의 fd_sent를 추가할지? (min, max)
-        # 3) 추가할 fd_sent들은 어떤 cond에 대한 pos인 그룹군을 사용할지
-        # 3-1) 만약 n(>1)개의 fd_sent를 추가할 때, 모든 fd_sent를 동일한 cond에 대한 pos인 것으로 할지, 서로 다른 cond에 대한 pos로 구성할지
-        pass
+    def _get_complacency(
+        self, finding: str, fd_features, 
+        finding_label_df, fd_sent_label_df,
+        chexbert_model, chexbert_tokenizer, batch_size, device
+        ):
+        
+        cond_list = finding_label_df.keys()[1:]
+        _cond_list = fd_sent_label_df.keys()[1:]
+        assert cond_list.all() == _cond_list.all()
 
-################################################################
-################################################################
+        # Exclude "No Finding" label
+        _fd_features = fd_features[:-1]
 
-    def generate_swap_error(self):
-        pass
+        neg_cond_idxs = np.where(_fd_features == float(0))[0]
+        neg_conds = [cond_list[idx] for idx in neg_cond_idxs]
+
+        nan_cond_idxs = np.where(_fd_features == np.nan)[0]
+        nan_conds = [cond_list[idx] for idx in nan_cond_idxs]
+
+        # if there is no neg or nan label, cannot generate complacency error
+        if len(neg_conds) == 0 and len(nan_conds) == 0:
+            return []
+        
+        conds = neg_conds + nan_conds
+        random_idx = random.randrange(len(conds))
+        target_cond = conds[random_idx]
+        if target_cond in neg_conds:
+            target_cond_label = float(0)
+        elif target_cond in nan_conds:
+            target_cond_label = np.nan
+        else:
+            raise NotImplementedError
+
+        target_opp_dict = {}
+        fd_sents = sent_tokenize(finding)
+        for sent_id in range(len(fd_sents)):
+
+            fd_sent_features = fd_sent_label_df[
+                fd_sent_label_df[REPORTS] == fd_sents[sent_id]
+            ].values[0][1:]
+            # Exclude "No Finding" label
+            _fd_sent_features = fd_sent_features[:-1]
+
+            target_cond_idx = CONDITIONS_DICT[target_cond]
+            if _fd_sent_features[target_cond_idx] == target_cond_label:
+                target_opp_idxes = fd_sent_label_df[
+                    fd_sent_label_df[target_cond] == float(1)
+                ].index.tolist()
+
+                random.shuffle(target_opp_idxes)
+                _target_opp_idxes = target_opp_idxes[:10]
+                _target_opp_idxes.sort(reverse=False)
+
+                tmp_df = fd_sent_label_df.iloc[target_opp_idxes]
+                target_opp_fd_sent_list = tmp_df.loc[:, REPORTS].values.tolist()
+                # target_opp_features_list = tmp_df.loc[:, CONDITIONS].values.tolist()
+                target_opp_dict[sent_id] = target_opp_fd_sent_list
+
+        target_opp_fd_sent_list = []
+        for _, curr_fd_sent_list in target_opp_dict.items():
+            target_opp_fd_sent_list += curr_fd_sent_list
+
+        if len(target_opp_fd_sent_list) == 0:
+            return []
+
+        target_opp_fd_sent_list = list(set(target_opp_fd_sent_list))
+
+        max_num_of_insert = 1
+        error_cand_list = []
+        for _ in range(2*batch_size):
+            error_cand = []
+            for sent_id in range(len(fd_sents)):
+                if target_cond_label == float(0) and sent_id in target_opp_dict:
+                    continue
+                else:
+                    error_cand.append(fd_sents[sent_id])
+
+            if len(error_cand) > 0:
+                for _ in range(max_num_of_insert):
+                    insert_position = random.randrange(len(error_cand))
+                    insert_fd_sent = target_opp_fd_sent_list[random.randrange(len(target_opp_fd_sent_list))]
+                    error_cand.insert(insert_position, insert_fd_sent)
+
+                error_cand = " ".join(error_cand)
+                error_cand_list.append(error_cand)
+
+        if len(error_cand_list) == 0:
+            print(1)
+            return []
+
+        y_pred = self._chexbert_forward(
+            chexbert_model, chexbert_tokenizer, batch_size, device,
+            error_cand_list
+        )
+        error_features_list = self._sample_wise(y_pred)
+        error_features_list = self._map_chexbert_to_chexpert_label(error_features_list)
+        for error_features in error_features_list:
+           self._convert_tree_structure(error_features)
+
+        # Exclude "No Finding"
+        _error_features_list = [error_features[:-1] for error_features in error_features_list]
+
+        complacency_list = []
+        for i in range(len(_error_features_list)):
+            if self._is_complacency(target_cond, _error_features_list[i]):
+                #complacency_list.append(error_cand_list[i])
+                complacency_list += [(error_cand_list[i], _error_features_list[i])]
+
+        if len(complacency_list) > 0:
+            return complacency_list
+        else:
+            return []
+
+    def _is_complacency(self, target_cond, c_error_features):
+        target_cond_idx = CONDITIONS_DICT[target_cond]
+        if c_error_features[target_cond_idx] == float(1):
+            return True
+        else:
+            return False
+
+    def _get_idx_of_positive_label(self, features_list):
+        pos_idxs_list = []
+        for features in features_list:
+            pos_idxs = [idx for idx in range(len(features)) if features[idx] == float(1)]
+            pos_idxs_list.append(pos_idxs)
+        
+        return pos_idxs_list
