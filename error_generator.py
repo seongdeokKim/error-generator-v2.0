@@ -313,7 +313,7 @@ class ErrorGeneratorForRREDv2:
 
 
         error_cand_list = []
-        for _ in range(2*batch_size - 1):
+        for _ in range(3*batch_size - 1):
             error_cand = self._get_p_error_candidate(
                 embedding_matrix, text_index_map,
                 finding, impression,
@@ -592,6 +592,7 @@ class ErrorGeneratorForRREDv2:
         generated_errors = {
             'faulty_reasoning_1': [],
             'faulty_reasoning_2': [],
+            'random_swap': [],
             'complacency': [],
             'original': []
         }
@@ -601,15 +602,15 @@ class ErrorGeneratorForRREDv2:
         ].values[0][1:]
 
 
-        # faulty_reasoning_1_list = self._get_faulty_reasoning_1(
-        #     finding, fd_features, finding_label_df
-        # )
+        faulty_reasoning_1_list = self._get_faulty_reasoning_1(
+            finding, fd_features, finding_label_df
+        )
 
-        # if len(faulty_reasoning_1_list) > 0:
-        #     #if np.random.choice([True, False], 1, p=[sf_prob, 1-sf_prob]).item():
-        #     # shuffling numerical_errors
-        #     #random.shuffle(faulty_reasoning_1_list)
-        #     generated_errors['faulty_reasoning_1'] += [faulty_reasoning_1_list[-1]]
+        if len(faulty_reasoning_1_list) > 0:
+            #if np.random.choice([True, False], 1, p=[sf_prob, 1-sf_prob]).item():
+            # shuffling numerical_errors
+            #random.shuffle(faulty_reasoning_1_list)
+            generated_errors['faulty_reasoning_1'] += [faulty_reasoning_1_list[-1]]
 
 
         faulty_reasoning_2_list = self._get_faulty_reasoning_2(
@@ -623,6 +624,15 @@ class ErrorGeneratorForRREDv2:
             # shuffling numerical_errors
             random.shuffle(faulty_reasoning_2_list)
             generated_errors['faulty_reasoning_2'] += [faulty_reasoning_2_list[-1]]
+
+
+        random_swap_list = self._get_random_swap(
+            finding, fd_features, finding_label_df
+        )
+
+        if len(random_swap_list) > 0:
+            generated_errors['random_swap'] += [random_swap_list[-1]]
+
 
         complacency_list = self._get_complacency(
             finding, fd_features,
@@ -648,11 +658,7 @@ class ErrorGeneratorForRREDv2:
         # Exclude "No Finding" class
         _fd_features = fd_features[:-1]
 
-        cond_list = finding_label_df.keys()
-
-
-        # 1. pos + neg -> 합집합O, 교집합X
-        # 2. 50%/50%: ~fuzzy(=random) OR fuzzy func. 기준 유사도 높은 candidates(but label 상이) 추출
+        cond_list = finding_label_df.keys()[1:]
 
         pos_cond_idxs = np.where(_fd_features == float(1))[0]
         pos_conds = [cond_list[idx] for idx in pos_cond_idxs]
@@ -682,51 +688,22 @@ class ErrorGeneratorForRREDv2:
         for idx in set_pos_opp_fd_idxes:
             if idx in set_neg_opp_fd_idxes:
                 opp_fd_idxes.append(idx)
-        opp_fd_idxes = list(set(opp_fd_idxes))
-        opp_fd_idxes.sort(reverse=False)
-
-        if len(opp_fd_idxes) < 1:
+        if len(opp_fd_idxes) == 0:
             return []
 
-        #select_method = np.random.choice(['random', 'similarity'], 1, p=[0.5, 0.5]).item()
-        #select_method = np.random.choice(['random', 'similarity'], 1, p=[0.0, 1.0]).item()
-        select_method = np.random.choice(['random', 'similarity'], 1, p=[1.0, 0.0]).item()
+        opp_fd_idxes = list(set(opp_fd_idxes))
+        random.shuffle(opp_fd_idxes)
+        _opp_fd_idxes = opp_fd_idxes[:20]
+        _opp_fd_idxes.sort(reverse=False)
 
-        if select_method == 'random':
-            random_idx = random.randrange(len(opp_fd_idxes))
-            opp_fd_idx = opp_fd_idxes[random_idx]
-            error_fd = finding_label_df.iloc[opp_fd_idx][REPORTS]
-            error_features = finding_label_df.iloc[opp_fd_idx][CONDITIONS]
-            return [error_fd]
-            #return [(error_fd_list[-1], _error_features_list[-1])]
-
-        # elif select_method == 'similarity':
-        #     opp_imp_features_list = imp_label_df.iloc[opp_imp_idxes, :].values
-        #     _opp_imp_features_list = [
-        #         list(map(str, opp_imp_features[1:])) for opp_imp_features in opp_imp_features_list
-        #     ]
-
-        #     _imp_features = list(map(str, imp_features[1:]))
-
-        #     sim_list = []
-        #     for _opp_imp_features in _opp_imp_features_list:
-        #         match_dist = [
-        #             _imp_features[i] == _opp_imp_features[i] for i in range(len(_imp_features))
-        #         ]
-        #         sim = match_dist.count(True)/len(match_dist)
-        #         sim_list.append(sim)
-
-        #     max_sim = max(sim_list)
-        #     max_sim_pos_list = [i for i, sim in enumerate(sim_list) if sim == max_sim]
-        #     random.shuffle(max_sim_pos_list)
-        #     max_sim_opp_imp = opp_imps[max_sim_pos_list[-1]]
-
-        #     swapped_findings += imp_fd_map[max_sim_opp_imp]
-            
-        #     #random.shuffle(swapped_findings)
-        #     #return swapped_findings[-1]
-
-        return error_fd
+        tmp_df = finding_label_df.iloc[_opp_fd_idxes]
+        swap_findings = tmp_df.loc[:, REPORTS].values.tolist()
+        swap_features = tmp_df.loc[:, CONDITIONS].values.tolist()
+        _swap_features = [sf[:-1] for sf in swap_features]
+        random_idx = random.randrange(len(swap_findings))
+        
+        #return swap_findings
+        return [(swap_findings[random_idx], _swap_features[random_idx])]
 
     def _get_faulty_reasoning_2(
         self, finding: str, fd_features, 
@@ -738,8 +715,6 @@ class ErrorGeneratorForRREDv2:
         # if there is no finding, cannot generate faulty_reasoning_2 error
         if fd_features[-1] == float(1):
             return []
-
-        faulty_reasoning_2_list = []
 
         cond_list = finding_label_df.keys()[1:]
         _cond_list = fd_sent_label_df.keys()[1:]
@@ -804,7 +779,7 @@ class ErrorGeneratorForRREDv2:
                 swap_fd_sent_dict[sent_id] = swap_fd_sent_list
 
         error_cand_list = []
-        for _ in range(2*batch_size):
+        for _ in range(3*batch_size):
             error_cand = []       
             swap_count = 0
             for sent_id in range(len(fd_sents)):
@@ -883,7 +858,12 @@ class ErrorGeneratorForRREDv2:
         neg_cond_idxs = np.where(_fd_features == float(0))[0]
         neg_conds = [cond_list[idx] for idx in neg_cond_idxs]
 
-        nan_cond_idxs = np.where(_fd_features == np.nan)[0]
+        # nan_cond_idxs = np.where(_fd_features == np.nan)[0]
+        # is_nan = np.isnan(_fd_features.astype(float))
+        # nan_cond_idxs = np.where(is_nan == True)[0]
+        #__fd_features = np.array(list(map(lambda x: None if np.isnan(x) else x), _fd_features))
+        __fd_features = np.array(list(map(lambda x: None if np.isnan(x) else x, _fd_features)))
+        nan_cond_idxs = np.where(__fd_features == None)[0]
         nan_conds = [cond_list[idx] for idx in nan_cond_idxs]
 
         # if there is no neg or nan label, cannot generate complacency error
@@ -911,19 +891,23 @@ class ErrorGeneratorForRREDv2:
             _fd_sent_features = fd_sent_features[:-1]
 
             target_cond_idx = CONDITIONS_DICT[target_cond]
-            if _fd_sent_features[target_cond_idx] == target_cond_label:
-                target_opp_idxes = fd_sent_label_df[
-                    fd_sent_label_df[target_cond] == float(1)
-                ].index.tolist()
+            if np.isnan(target_cond_label) and not np.isnan(_fd_sent_features[target_cond_idx]):
+                continue
+            if target_cond_label == float(0) and _fd_sent_features[target_cond_idx] != target_cond_label:
+                continue
 
-                random.shuffle(target_opp_idxes)
-                _target_opp_idxes = target_opp_idxes[:10]
-                _target_opp_idxes.sort(reverse=False)
+            target_opp_idxes = fd_sent_label_df[
+                fd_sent_label_df[target_cond] == float(1)
+            ].index.tolist()
 
-                tmp_df = fd_sent_label_df.iloc[target_opp_idxes]
-                target_opp_fd_sent_list = tmp_df.loc[:, REPORTS].values.tolist()
-                # target_opp_features_list = tmp_df.loc[:, CONDITIONS].values.tolist()
-                target_opp_dict[sent_id] = target_opp_fd_sent_list
+            random.shuffle(target_opp_idxes)
+            _target_opp_idxes = target_opp_idxes[:10]
+            _target_opp_idxes.sort(reverse=False)
+
+            tmp_df = fd_sent_label_df.iloc[target_opp_idxes]
+            target_opp_fd_sent_list = tmp_df.loc[:, REPORTS].values.tolist()
+            # target_opp_features_list = tmp_df.loc[:, CONDITIONS].values.tolist()
+            target_opp_dict[sent_id] = target_opp_fd_sent_list
 
         target_opp_fd_sent_list = []
         for _, curr_fd_sent_list in target_opp_dict.items():
@@ -936,7 +920,7 @@ class ErrorGeneratorForRREDv2:
 
         max_num_of_insert = 1
         error_cand_list = []
-        for _ in range(2*batch_size):
+        for _ in range(3*batch_size):
             error_cand = []
             for sent_id in range(len(fd_sents)):
                 if target_cond_label == float(0) and sent_id in target_opp_dict:
@@ -964,7 +948,7 @@ class ErrorGeneratorForRREDv2:
         error_features_list = self._sample_wise(y_pred)
         error_features_list = self._map_chexbert_to_chexpert_label(error_features_list)
         for error_features in error_features_list:
-           self._convert_tree_structure(error_features)
+            self._convert_tree_structure(error_features)
 
         # Exclude "No Finding"
         _error_features_list = [error_features[:-1] for error_features in error_features_list]
@@ -986,6 +970,106 @@ class ErrorGeneratorForRREDv2:
             return True
         else:
             return False
+
+    # def _get_random_swap(
+    #     self, finding: str, fd_features, finding_label_df
+    #     ):
+
+    #     cond_list = finding_label_df.keys()[1:]
+
+    #     # Exclude "No Finding" class
+    #     _fd_features = fd_features[:-1]
+        
+    #     label_list = [float(1), float(0), np.nan]
+
+    #     curr_label_list = set(_fd_features)
+    #     print(curr_label_list)
+    #     source_label = np.random.choice(curr_label_list, 1,replace=False).item()
+    #     source_cond_idxs = np.where(_fd_features == source_label)[0]
+    #     source_conds = [cond_list[idx] for idx in source_cond_idxs]
+
+    #     label_list.remove(source_label)
+    #     target_label = np.random.choice(label_list, 1,replace=False).item()
+
+    #     target_label = np.nan
+    #     # max_iter = 2 * len(label_list)
+    #     # current_iter = 0
+    #     # while True:
+    #     #     source_label = np.random.choice(label_list, 1,replace=False).item()
+    #     #     source_cond_idxs = np.where(_fd_features == source_label)[0]
+    #     #     source_conds = [cond_list[idx] for idx in source_cond_idxs]
+    #     #     if len(source_conds) > 0:
+    #     #         break
+
+    #     #     current_iter += 1
+    #     #     if current_iter > max_iter:
+    #     #         return []
+
+    #     # label_list.remove(source_label)
+    #     # target_label = np.random.choice(label_list, 1,replace=False).item()
+
+    #     target_fd_idxes = []
+    #     for source_cond in source_conds:
+    #         curr_target_fd_idxes = finding_label_df[
+    #             finding_label_df[source_cond] == target_label
+    #         ].index
+    #         target_fd_idxes += list(curr_target_fd_idxes)
+
+    #     if len(target_fd_idxes) == 0:
+    #         return []
+
+    #     target_fd_idxes = list(set(target_fd_idxes))
+    #     random.shuffle(target_fd_idxes)
+    #     _target_fd_idxes = target_fd_idxes[:20]
+    #     _target_fd_idxes.sort(reverse=False)
+
+    #     tmp_df = finding_label_df.iloc[_target_fd_idxes]
+    #     swap_findings = tmp_df.loc[:, REPORTS].values.tolist()
+    #     swap_features = tmp_df.loc[:, CONDITIONS].values.tolist()
+    #     _swap_features = [sf[:-1] for sf in swap_features]
+    #     random_idx = random.randrange(len(swap_findings))
+        
+    #     #return swap_findings
+    #     return [(swap_findings[random_idx], _swap_features[random_idx])]
+
+    def _get_random_swap(
+        self, finding: str, fd_features, finding_label_df
+        ):
+
+        # Exclude "No Finding" class
+        _fd_features = fd_features[:-1]
+
+        random_idxes_set = set()
+        while len(random_idxes_set) < 50:
+            random_idx = random.randrange(finding_label_df.shape[0])
+            random_idxes_set.add(random_idx)
+        random_idxes = list(random_idxes_set)
+        random_idxes.sort(reverse=False)
+
+        tmp_df = finding_label_df.iloc[random_idxes]
+        random_findings = tmp_df.loc[:, REPORTS].values.tolist()
+        random_features_list = tmp_df.loc[:, CONDITIONS].values.tolist()
+        _random_features_list = [rf[:-1] for rf in random_features_list]
+
+        swap_findings = []
+        _swap_features_list = []
+        for i in range(len(random_idxes)):
+            _random_features = _random_features_list[i]
+
+            # to compare ndarray, need to convert np.nan to None
+            __fd_features = np.array(list(map(lambda x: None if np.isnan(x) else x, _fd_features)))
+            __random_features = np.array(list(map(lambda x: None if np.isnan(x) else x, _random_features)))
+
+            if (__fd_features == __random_features).all() != True:
+                swap_findings.append(random_findings[i])
+                _swap_features_list.append(_random_features)
+
+        if len(swap_findings) > 0:
+            random_idx = random.randrange(len(swap_findings))
+            return [(swap_findings[random_idx], _swap_features_list[random_idx])]
+        else:
+            return []
+
 
     def _get_idx_of_positive_label(self, features_list):
         pos_idxs_list = []
