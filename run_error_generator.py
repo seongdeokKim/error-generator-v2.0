@@ -56,7 +56,7 @@ def generate_error(
     max_epoch
     ):
 
-    ERROR_TYPES, _ = get_error_types_with_prob()
+    ERROR_TYPES, ERROR_TYPE_PROB = get_error_types_with_prob()
 
     eg_v2 = ErrorGenerator()
 
@@ -98,7 +98,6 @@ def generate_error(
     print('...... LOADING FINDING & IMPRESSION EMBEDDING using CXR-BERT......')
     embedding_matrix, text_index_map = eg_v2.get_embedding_matrix(embedding_cache_path)
 
-    # get data for generating interpretive errors
     print('...... LOADING FINDING LABEL using CheXbert ......')
     finding_label_df = eg_v2.get_chexbert_label_of_finding(
         chexbert_model, chexbert_tokenizer, batch_size, device,
@@ -108,11 +107,9 @@ def generate_error(
     print('...... LOADING CHEXPERT LABLER WITH PANDAS.DATAFRAME ......')
     fd_sent_label_df = eg_v2.get_chexpert_label_of_finding_sents(chexpert_label_of_finding_sent)
 
-    fw_test = open('/home/workspace/error_generator_result.txt', 'w', encoding='utf-8')
-    error_subtype_counter = {}
     for epoch in range(int(max_epoch)):
-        epoch_start = time.time()
         with open(output_file.replace('.jsonl', f'_e{epoch+1}.jsonl'), encoding= "utf-8",mode='w+') as fw:
+            
             for idx, sample in enumerate(eg_v2.original_samples):
                 if sample['Findings'].strip() == '' or sample['Findings'] is None:
                     continue
@@ -123,10 +120,8 @@ def generate_error(
                 if (idx+1) % 100 == 0:
                     print(f'... EPOCH {epoch+1} ::: {idx+1}/{len(eg_v2.original_samples)} finish ...')
 
-                current_error_type = np.random.choice(ERROR_TYPES, 1, replace=False).item()
-                # current_error_type = np.random.choice(ERROR_TYPES, 1, p=ERROR_TYPE_PROB,replace=False).item()
-                # current_error_type = 'FM'
-                #current_start = time.time()
+                # current_error_type = np.random.choice(ERROR_TYPES, 1, replace=False).item()
+                current_error_type = np.random.choice(ERROR_TYPES, 1, p=ERROR_TYPE_PROB,replace=False).item()
 
                 if current_error_type == 'FM':
                     try:
@@ -193,10 +188,6 @@ def generate_error(
 
                 for error_subtype, error_findings in output.items():
                     for error_finding in error_findings:
-                        if error_subtype not in error_subtype_counter:
-                            error_subtype_counter[error_subtype] = 0
-                        error_subtype_counter[error_subtype] += 1
-
                         if error_subtype in ['numerical_error', 'unit_error', 'laterality_error']:
                             error_sample = dict(sample)
 
@@ -206,12 +197,6 @@ def generate_error(
                                     
                             json_record = json.dumps(error_sample, ensure_ascii=False)
                             fw.write(json_record+"\n")
-
-                            fw_test.write('##{}_org\t{}\t{}\n##{}_error\t{}\t{}\n'.format(
-                                str(idx), error_subtype, error_sample['original_Findings'],
-                                str(idx), error_subtype, error_sample['Findings']
-                            ))
-
                         else:
                             
                             fd_features = finding_label_df[
@@ -232,30 +217,16 @@ def generate_error(
                             json_record = json.dumps(error_sample, ensure_ascii=False)
                             fw.write(json_record+"\n")
 
-                            fw_test.write('##{}_org\t{}\t{}\t{}\n##{}_error\t{}\t{}\t{}\n'.format(
-                                str(idx), error_subtype, error_sample['original_Findings'], error_sample['original_labels'],
-                                str(idx), error_subtype, error_sample['Findings'], error_sample['labels']
-                            ))
-
-                #print(f"{current_error_type} error, {str(time.time()-current_start)[:5]}")
-        
-        print(f"{str(time.time()-epoch_start)[:5]}")
-
-    print(error_subtype_counter)
 
 def main():
     parser = argparse.ArgumentParser()
-#    parser.add_argument("--input", type=str, help="input file of unaugmented data")
     parser.add_argument("--input", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/frontal_test.jsonl", help="input file of unaugmented data")
-
-    # parser.add_argument("--output", type=str, default="/home/workspace/rred_v2_frontal_val_error.jsonl", help="output file of unaugmented data")
     parser.add_argument("--output", type=str, default="/home/data/mimic-cxr-jpg/2.0.0/rred/error_baseline_Mixed_FPI_v0.4/frontal_test_error.jsonl", help="output file of unaugmented data")
 
     parser.add_argument("--cxr_bert_embedding_cache_path", type=str, default="/home/data/text_embedding_of_cxr-bert/text_embedding_path.pkl", help="embeddings of text using CXR-BERT")
     parser.add_argument("--chexbert_model_path", type=str, default="/home/workspace/models/chexbert.pth")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--device", type=str, default='cuda')
-    # parser.add_argument("--device", type=str, default='cpu')
 
     parser.add_argument("--chexpert_label_of_finding_sent", default="/home/data/CheXpert_labeler_result/labeled_chexpert_finding_sent.csv", type=str)
 
